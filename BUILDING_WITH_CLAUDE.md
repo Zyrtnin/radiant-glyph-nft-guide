@@ -1,0 +1,810 @@
+# Building NFT Applications on Radiant with Claude AI
+
+**A Guide for Radiant Blockchain Developers**
+
+This document shares lessons learned from building a production NFT application on Radiant blockchain using Claude AI as a development partner. It includes practical examples, common pitfalls, and strategies for effective AI-assisted blockchain development.
+
+---
+
+## Table of Contents
+
+1. [Introduction](#introduction)
+2. [Critical Discoveries](#critical-discoveries)
+3. [Why Claude for Blockchain Development](#why-claude-for-blockchain-development)
+4. [Project Setup](#project-setup)
+5. [Working with Claude](#working-with-claude)
+6. [Glyph NFT Implementation](#glyph-nft-implementation)
+7. [Critical Gotchas](#critical-gotchas)
+8. [Debugging Workflow](#debugging-workflow)
+9. [Testing Strategy](#testing-strategy)
+10. [Code Patterns That Work](#code-patterns-that-work)
+11. [Resources](#resources)
+
+---
+
+## Introduction
+
+This guide documents the experience of building a complete Glyph NFT minting system on Radiant blockchain with Claude AI assistance. The result: working mainnet NFTs using the commit/reveal pattern with singleton ref technology.
+
+**What We Built:**
+- Full commit/reveal NFT minting pipeline
+- CBOR-encoded Glyph protocol metadata
+- **On-chain thumbnails for wallet display** (critical!)
+- Node.js signing integration for custom scripts
+- Player wallet minting (Option B)
+- Container/author ref support for NFT organization
+- IPFS integration for full-resolution photo storage
+
+**Verified Mainnet Transactions:**
+- With on-chain thumbnail: `27390efab1e3168c05301b18f6cdfd553a6d122a41496d0f5e104e79a918be7e`
+
+---
+
+## Critical Discoveries
+
+> **Read this section first.** These are hard-won lessons that will save you hours of debugging.
+
+### Discovery 1: On-Chain Images Are Required
+
+**The Problem:**
+We created NFTs with IPFS links in the `loc` field. They appeared in Glyph Explorer and Glyphium wallet... as blank cards. No image displayed.
+
+**The Investigation:**
+After much debugging, we discovered that Glyph wallets look for the `main` field to display NFT images. IPFS links are for full-resolution backup only.
+
+**The Solution:**
+```javascript
+payload.main = {
+    t: 'image/jpeg',           // MIME type
+    b: thumbnailUint8Array     // Image data as Uint8Array (NOT base64!)
+};
+```
+
+**Cost Impact:**
+- 150px, 65% quality thumbnail: ~6KB, ~0.06 RXD extra cost
+- Worth it for visible NFTs!
+
+### Discovery 2: CBOR Encoding is Mandatory
+
+**The Problem:**
+NFTs showed as "Unknown NFT" with no metadata visible in Glyph wallets.
+
+**The Root Cause:**
+Our code had a fallback to JSON when CBOR library wasn't loaded:
+```javascript
+// This silent fallback broke everything!
+if (typeof CBOR === 'undefined') {
+    console.warn('Using JSON fallback');
+    return JSON.stringify(data);  // WRONG!
+}
+```
+
+**The Solution:**
+```javascript
+if (typeof CBOR === 'undefined') {
+    throw new Error('CBOR library not loaded! NFT would be unreadable.');
+}
+```
+
+**How We Found It:**
+Claude suggested checking the browser console. We saw "CBOR library not loaded, using JSON fallback" - the library wasn't loading due to script order in HTML.
+
+### Discovery 3: Thumbnail Quality vs Size Tradeoff
+
+**Initial Attempt:** 100px, 50% quality
+- Result: Blurry, pixelated thumbnails
+- Size: ~3KB
+
+**Final Settings:** 150px, 65% quality
+- Result: Clear, recognizable images
+- Size: ~6KB
+- Cost: ~0.06 RXD extra
+
+**The Lesson:**
+Don't over-optimize thumbnail size. A few KB difference costs pennies but makes NFTs look professional.
+
+### Discovery 4: SSL Certificate Issues with IPFS
+
+**The Problem:**
+IPFS uploads failing with: "SSL certificate problem: unable to get local issuer certificate"
+
+**The Quick Fix (Development):**
+```bash
+# In .env
+IPFS_SKIP_SSL_VERIFY=true
+```
+
+**The Proper Fix (Production):**
+Configure `curl.cainfo` in php.ini with valid CA certificates.
+
+---
+
+## Why Claude for Blockchain Development
+
+### Strengths
+
+**Complex Protocol Understanding:**
+Claude excels at understanding and implementing complex blockchain protocols:
+- Parsed Radiant opcodes and script structures
+- Understood commit/reveal patterns
+- Grasped CBOR encoding requirements
+- Followed introspection opcode logic
+- **Discovered undocumented requirements** (like on-chain images)
+
+**Debugging Partner:**
+When transactions failed, Claude:
+- Analyzed hex dumps of scripts
+- Compared working vs failing transactions
+- Identified byte-level encoding errors
+- Suggested targeted fixes
+- **Traced issues through entire data flow**
+
+**Documentation:**
+Claude automatically generated:
+- Comprehensive implementation guides
+- Debugging documentation
+- API endpoint specifications
+- Test transaction references
+- **Updated docs as new discoveries were made**
+
+### Limitations
+
+**Doesn't Have Radiant Mainnet Access:**
+Claude can't:
+- Test transactions directly
+- Verify on-chain data
+- Check current blockchain state
+- Access mempool status
+
+**You Still Need:**
+- Actual Radiant node for testing
+- Manual verification of transactions
+- Hex editor for script inspection
+- Block explorer for confirmation
+- **Screenshots of wallet display** (for visual issues)
+
+---
+
+## Project Setup
+
+### 1. Start with Your Environment
+
+**Tell Claude About Your Stack:**
+
+```
+"I'm building on Radiant blockchain. Here's my environment:
+- Radiant node via Docker (RPC on port 7332)
+- PHP backend for RPC calls
+- JavaScript frontend
+- Node.js 18+ available
+- Windows development machine
+
+I want to implement Glyph NFTs using commit/reveal pattern."
+```
+
+### 2. Share Existing Code
+
+If you have existing blockchain code:
+
+```
+"Here's my current blockchain_rpc.php file that handles RPC calls.
+I need to add NFT minting functionality."
+
+[Paste or upload your code]
+```
+
+Claude will analyze your patterns and match the coding style.
+
+### 3. Reference Documentation
+
+Provide Claude with:
+- Radiant opcode documentation
+- Glyph protocol specs
+- Example transactions (if available)
+
+```
+"The Radiant opcode summary is at: https://radiant4people.com/programming/radiant/opcode_summary/
+
+Key opcodes:
+- 0xd8: OP_PUSHINPUTREFSINGLETON
+- 0xc8: OP_OUTPOINTTXHASH (NOT 0xc1!)
+- 0xc9: OP_OUTPOINTINDEX (NOT 0xc2!)
+"
+```
+
+### 4. Critical Setup Checklist
+
+Before writing any code, ensure:
+
+- [ ] CBOR library downloaded and added to HTML **before** blockchain scripts
+- [ ] Radiant node accessible via RPC
+- [ ] Node.js 18+ installed for signing scripts
+- [ ] `@radiantblockchain/radiantjs` installed
+- [ ] IPFS provider configured (Pinata recommended)
+
+---
+
+## Working with Claude
+
+### Effective Prompting Strategies
+
+#### Be Specific About Radiant Differences
+
+```
+❌ BAD: "How do I calculate transaction fees?"
+
+✅ GOOD: "Radiant uses sat/byte for fees (NOT sat/kB like Bitcoin).
+The minimum is 1000 sat/byte. Here's my current code that's wrong:
+$fee = ($txSize * $feeRate) / 1000;
+How should I fix this?"
+```
+
+#### Share Visual Evidence
+
+```
+✅ GOOD: "My NFTs mint successfully but show as blank cards in Glyphium.
+[Attach screenshot of wallet showing blank NFTs]
+
+Here's my payload structure:
+{
+    p: [2],
+    name: 'Test NFT',
+    loc: 'ipfs://Qm...'
+}
+
+What's missing?"
+```
+
+This led to discovering the `main` field requirement.
+
+#### Include Context from Multiple Sources
+
+```
+"Here's what I'm seeing:
+
+Console log: 'Thumbnail: 150x200, 14538 bytes'
+PHP log: 'IPFS upload failed: SSL certificate error'
+Wallet display: NFT shows with placeholder image
+
+The full-res upload is failing. What should I check?"
+```
+
+### Iterative Development
+
+**Start Simple, Then Enhance:**
+
+1. **Phase 1:** Get basic NFT minting working
+   ```
+   "Let's first create a simple NFT with just name and protocol fields."
+   ```
+
+2. **Phase 2:** Add on-chain images
+   ```
+   "NFTs are blank in wallet. Let's add thumbnail support."
+   ```
+
+3. **Phase 3:** Add IPFS integration
+   ```
+   "Now add IPFS for full-resolution backup images."
+   ```
+
+4. **Phase 4:** Optimize
+   ```
+   "Thumbnails are too large (15KB). Let's find optimal size/quality balance."
+   ```
+
+**Document Each Success:**
+
+```
+"The NFT with thumbnail worked! Cost was 0.16 RXD.
+Here's the reveal txid: 27390efab1e3168c05301b18f6cdfd553a6d122a41496d0f5e104e79a918be7e
+Please document this for future reference."
+```
+
+---
+
+## Glyph NFT Implementation
+
+### Complete Payload Structure
+
+Based on real-world testing, here's what a complete payload looks like:
+
+```javascript
+const payload = {
+    p: [2],                           // Protocol: NFT (REQUIRED)
+    name: "Score: 1,234,567",         // Display name (REQUIRED)
+    type: "photo",                    // Type (optional)
+    main: {                           // On-chain image (REQUIRED for display!)
+        t: 'image/jpeg',
+        b: thumbnailUint8Array        // NOT base64!
+    },
+    loc: 'ipfs://Qm...',              // Full-res backup (optional)
+    attrs: {                          // Custom attributes (optional)
+        score: 1234567,
+        game: "Medieval Madness",
+        player: "Alice",
+        tournament: "Weekly Tournament",
+        trust_level: "high"
+    }
+};
+```
+
+### Thumbnail Creation
+
+**Optimized settings based on testing:**
+
+```javascript
+async createThumbnail(dataUrl, maxSize = 150, quality = 0.65) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+            let width = img.width;
+            let height = img.height;
+
+            // Scale while maintaining aspect ratio
+            if (width > height) {
+                if (width > maxSize) {
+                    height = Math.round((height * maxSize) / width);
+                    width = maxSize;
+                }
+            } else {
+                if (height > maxSize) {
+                    width = Math.round((width * maxSize) / height);
+                    height = maxSize;
+                }
+            }
+
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';  // Important for quality!
+            ctx.drawImage(img, 0, 0, width, height);
+
+            canvas.toBlob((blob) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    const uint8Array = new Uint8Array(reader.result);
+                    console.log(`Thumbnail: ${width}x${height}, ${uint8Array.length} bytes`);
+                    resolve(uint8Array);
+                };
+                reader.onerror = reject;
+                reader.readAsArrayBuffer(blob);
+            }, 'image/jpeg', quality);
+        };
+        img.onerror = reject;
+        img.src = dataUrl;
+    });
+}
+```
+
+### CBOR Encoding with Verification
+
+```javascript
+function encodeGlyphData(data) {
+    // CRITICAL: Verify CBOR is loaded
+    if (typeof CBOR === 'undefined') {
+        throw new Error('CBOR library not loaded! NFT would be unreadable.');
+    }
+
+    // Set protocol if missing
+    if (!data.p) {
+        data.p = [2];
+    }
+
+    // Encode
+    const marker = new TextEncoder().encode('gly');
+    const cborData = CBOR.encode(data);
+    const payload = new Uint8Array(cborData);
+
+    // Combine
+    const result = new Uint8Array(marker.length + payload.length);
+    result.set(marker, 0);
+    result.set(payload, marker.length);
+
+    console.log(`Glyph payload: ${result.length} bytes`);
+    return result;
+}
+```
+
+---
+
+## Critical Gotchas
+
+### 1. Blank NFTs in Wallet
+
+**Symptom:** NFT mints successfully, shows in explorer, but blank card in wallet.
+
+**Cause:** Missing `main` field with on-chain image.
+
+**Fix:**
+```javascript
+payload.main = {
+    t: 'image/jpeg',
+    b: thumbnailUint8Array  // Must be Uint8Array!
+};
+```
+
+### 2. "Unknown NFT" with No Metadata
+
+**Symptom:** NFT appears but shows "Unknown NFT", no attributes visible.
+
+**Cause:** CBOR library not loaded, falling back to JSON.
+
+**Fix:**
+1. Download CBOR library
+2. Load **before** blockchain scripts in HTML
+3. Verify: `console.log(typeof CBOR)` should output "object"
+
+### 3. Fee Calculation (Radiant-Specific)
+
+**The Bug:**
+```php
+// WRONG - Bitcoin-style calculation
+$fee = ($txSize * $feeRate) / 1000;
+```
+
+**The Fix:**
+```php
+// CORRECT - Radiant uses sat/byte
+$fee = $txSize * $feeRate;
+```
+
+### 4. Singleton Ref Format
+
+**The Bug:**
+```php
+// WRONG - Added push opcode
+$singletonScript = 'd824' . $ref . '7576a914' . $pubkeyhash . '88ac';
+```
+
+**The Fix:**
+```php
+// CORRECT - OP_PUSHINPUTREFSINGLETON consumes next 36 bytes directly
+$singletonScript = 'd8' . $ref . '7576a914' . $pubkeyhash . '88ac';
+```
+
+### 5. Signing Subscript
+
+**The Bug:**
+```javascript
+// WRONG - Signing with P2PKH only
+const p2pkhScript = Script.buildPublicKeyHashOut(address);
+const sig = Transaction.Sighash.sign(tx, privateKey, sigType, 0, p2pkhScript, amount);
+```
+
+**The Fix:**
+```javascript
+// CORRECT - Sign with full commit script
+tx.setInputScript(0, (txObj, output) => {
+    const sig = Transaction.Sighash.sign(
+        txObj, privateKey, sigType, 0,
+        output.script,  // ✅ Full nftCommitScript
+        commitAmount
+    );
+    // ...
+});
+```
+
+### 6. Poor Thumbnail Quality
+
+**The Bug:**
+```javascript
+// Aggressive compression
+const thumbnail = await createThumbnail(dataUrl, 100, 0.5);
+// Result: Blurry, pixelated images
+```
+
+**The Fix:**
+```javascript
+// Balanced settings
+const thumbnail = await createThumbnail(dataUrl, 150, 0.65);
+// Result: Clear images, reasonable size (~6KB)
+```
+
+### 7. SSL Certificate Errors (IPFS)
+
+**Symptom:** "SSL certificate problem: unable to get local issuer certificate"
+
+**Development Fix:**
+```bash
+# In .env
+IPFS_SKIP_SSL_VERIFY=true
+```
+
+**Production:** Configure proper CA certificates.
+
+---
+
+## Debugging Workflow
+
+### When NFTs Don't Display
+
+**1. Check CBOR Encoding**
+```javascript
+console.log(typeof CBOR);  // Should be "object"
+```
+
+**2. Check Payload Structure**
+```javascript
+console.log('Payload:', JSON.stringify(payload, null, 2));
+// Verify: has p, name, main fields
+```
+
+**3. Check Thumbnail**
+```javascript
+console.log('Thumbnail type:', typeof payload.main?.b);
+// Should be "object" (Uint8Array)
+console.log('Thumbnail size:', payload.main?.b?.length);
+// Should be 5000-10000 bytes for 150px
+```
+
+**4. Check Transaction**
+- View on Glyph Explorer: `https://glyph.photonic.online/tx/<txid>`
+- Verify metadata decodes correctly
+
+### When Transactions Fail
+
+**1. Get the Full Error**
+```bash
+radiant-cli sendrawtransaction "0200000001..."
+# Note exact error message
+```
+
+**2. Share with Claude**
+```
+"Transaction rejected: bad-txns-inputs-outputs-invalid-transaction-reference-operations
+
+Raw TX: 0200000001263c6922...
+Commit txid: 6afb402d...
+
+What's wrong?"
+```
+
+**3. Compare Against Working Transaction**
+```
+"Here's a working reveal TX: 27390efab1e3168c...
+And my failing TX: 0200000001...
+
+Can you compare the structures?"
+```
+
+---
+
+## Testing Strategy
+
+### Verification Checklist
+
+Before minting to mainnet:
+
+- [ ] `typeof CBOR === 'object'` in browser console
+- [ ] Thumbnail is Uint8Array, < 15KB
+- [ ] Payload has `p`, `name`, and `main` fields
+- [ ] IPFS upload succeeds (if using)
+- [ ] Test CBOR encode/decode round-trip
+
+### Test on Testnet First
+
+```
+"Let's test on Radiant testnet first.
+Testnet RPC: localhost:18332
+
+Create a minimal NFT to verify:
+1. CBOR encoding works
+2. On-chain thumbnail displays
+3. Full mint flow completes"
+```
+
+### Verify in Multiple Places
+
+After minting:
+1. **Glyph Explorer** - Does metadata show?
+2. **Glyphium Wallet** - Does image display?
+3. **radiant-cli gettxout** - Does UTXO exist?
+
+---
+
+## Code Patterns That Work
+
+### Pattern 1: Complete Mint Flow
+
+```javascript
+async mintNFT(imageDataUrl, metadata) {
+    // 1. Create thumbnail
+    const thumbnail = await this.createThumbnail(imageDataUrl, 150, 0.65);
+    console.log(`Thumbnail: ${thumbnail.length} bytes`);
+
+    // 2. Upload full-res to IPFS
+    const ipfs = await this.uploadToIPFS(imageDataUrl);
+    console.log(`IPFS: ${ipfs.url}`);
+
+    // 3. Build payload with main field
+    const payload = {
+        p: [2],
+        name: metadata.name,
+        main: { t: 'image/jpeg', b: thumbnail },
+        loc: ipfs.url,
+        attrs: metadata.attrs
+    };
+
+    // 4. Encode and mint
+    const glyphData = this.encodeGlyphData(payload);
+    const result = await this.createSingletonNFT(glyphData);
+
+    return result;
+}
+```
+
+### Pattern 2: Defensive CBOR Check
+
+```javascript
+function encodeGlyphData(data) {
+    if (typeof CBOR === 'undefined') {
+        throw new Error(
+            'CBOR library not loaded! ' +
+            'Add <script src="js/cbor.min.js"></script> BEFORE blockchain scripts.'
+        );
+    }
+    // ... rest of encoding
+}
+```
+
+### Pattern 3: Thumbnail Size Validation
+
+```javascript
+async createThumbnail(dataUrl, maxSize, quality) {
+    const thumbnail = await this._createThumbnail(dataUrl, maxSize, quality);
+
+    if (thumbnail.length > 15000) {
+        console.warn(`Thumbnail large (${thumbnail.length} bytes). Consider reducing.`);
+    }
+
+    if (thumbnail.length < 1000) {
+        console.warn(`Thumbnail very small. May appear low quality.`);
+    }
+
+    return thumbnail;
+}
+```
+
+---
+
+## Resources
+
+### Documentation to Share with Claude
+
+**Radiant Blockchain:**
+- Main site: https://radiantblockchain.org
+- Opcode summary: https://radiant4people.com/programming/radiant/opcode_summary/
+- Glyph protocol: https://radiantblockchain.org/glyphs-protocol-guide.html
+
+**Libraries:**
+- radiantjs: https://github.com/RadiantBlockchain/radiantjs
+- Photonic Wallet: https://github.com/nickmasse/photonic-wallet
+- CBOR: https://github.com/paroga/cbor-js
+
+**Explorers:**
+- Mainnet: https://explorer.radiantblockchain.org
+- Glyph explorer: https://glyph.photonic.online
+
+### Example Prompts for Common Tasks
+
+**Adding On-Chain Thumbnails:**
+```
+"My NFTs show as blank in Glyphium wallet.
+
+I discovered I need a 'main' field with on-chain image data.
+Can you:
+1. Create a thumbnail function (150px, 65% quality)
+2. Add main field to payload with {t: mimetype, b: Uint8Array}
+3. Keep IPFS link in loc field for full-res"
+```
+
+**Debugging Unknown NFTs:**
+```
+"NFTs show as 'Unknown NFT' with no metadata.
+Browser console shows: 'CBOR library not loaded, using JSON fallback'
+
+How do I:
+1. Download and include CBOR library correctly
+2. Verify it's loaded before minting
+3. Prevent silent fallback to JSON"
+```
+
+**Optimizing Thumbnail Size:**
+```
+"My thumbnails are 30KB each, making minting expensive (~0.3 RXD).
+
+Current settings: 300px, 80% quality
+What settings give good visual quality at lower cost?"
+```
+
+---
+
+## Lessons Learned
+
+### What Worked
+
+1. **Visual Evidence**
+   - Screenshots of blank NFTs led to main field discovery
+   - Console logs revealed CBOR loading issue
+
+2. **Iterative Improvement**
+   - Started with 200px thumbnails (~15KB)
+   - Tested 100px (too blurry)
+   - Settled on 150px (good balance)
+
+3. **Comprehensive Logging**
+   - Log thumbnail size after creation
+   - Log CBOR library status
+   - Log IPFS upload results
+
+4. **Reference Transactions**
+   - Kept verified working transactions
+   - Compared hex when debugging
+
+### What Didn't Work
+
+1. **Silent Fallbacks**
+   - JSON fallback made debugging hard
+   - Solution: Fail loudly instead
+
+2. **Over-optimizing Early**
+   - 100px thumbnails saved bytes but looked bad
+   - Solution: Get it working first, then optimize
+
+3. **Assuming IPFS = Display**
+   - Thought IPFS link would show image
+   - Reality: Need on-chain thumbnail
+
+---
+
+## Conclusion
+
+Claude AI is a powerful partner for Radiant blockchain development. The key discoveries from this project:
+
+1. **On-chain images are required** - Use the `main` field
+2. **CBOR encoding is mandatory** - JSON = "Unknown NFT"
+3. **150px, 65% quality** is the optimal thumbnail setting
+4. **Verify visually** - Screenshots catch issues code can't
+
+**Keys to Success:**
+1. Be specific about Radiant-specific behaviors
+2. Share screenshots when things look wrong
+3. Verify CBOR library is loaded before minting
+4. Test in Glyphium wallet, not just explorer
+5. Document working transactions for reference
+
+**Cost Reference:**
+- Minimal NFT (no image): ~0.01 RXD
+- With 150px thumbnail: ~0.07 RXD
+- With 200px thumbnail: ~0.16 RXD
+
+Happy building on Radiant!
+
+---
+
+**Community Resources:**
+- Radiant Discord: https://discord.gg/radiantblockchain
+- Developer Chat: #development channel
+- Glyph NFT Discussion: #glyphs channel
+
+**Questions?**
+Post in #development with:
+- What you're trying to build
+- Screenshots of issues
+- Transaction IDs (if available)
+- Code snippets
+
+---
+
+**Last Updated:** 2026-01-10
+**Author:** Radiant Developer Community
+**License:** MIT - Free to use and share
+
+**Key Discoveries Documented:**
+1. On-chain images (`main` field) required for wallet display
+2. CBOR encoding mandatory (JSON = "Unknown NFT")
+3. Optimal thumbnail: 150px, 65% quality (~6KB, ~0.07 RXD)
+4. SSL certificate issues with IPFS in development
