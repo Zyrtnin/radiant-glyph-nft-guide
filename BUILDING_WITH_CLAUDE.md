@@ -103,7 +103,61 @@ Claude suggested checking the browser console. We saw "CBOR library not loaded, 
 **The Lesson:**
 Don't over-optimize thumbnail size. A few KB difference costs pennies but makes NFTs look professional.
 
-### Discovery 4: SSL Certificate Issues with IPFS
+### Discovery 4: Container/Author Refs Must Be Extracted, Not Calculated
+
+**The Problem:**
+Child NFTs existed on-chain and were visible in Glyphium, but they didn't appear nested under the container. Container showed 0 children despite child NFTs having the `in` field populated.
+
+**The Root Cause:**
+We calculated container/author refs from the reveal transaction ID:
+```javascript
+// ❌ WRONG - This creates orphaned NFTs!
+const containerRef = reverseHex(containerTxid) + '00000000';
+
+// Child NFT with wrong ref:
+payload.in = [hexToUint8Array(containerRef)];  // Orphaned!
+```
+
+**Why It Failed:**
+- The singleton ref in the output script is based on the COMMIT transaction
+- The reveal txid is NOT the same as the ref value
+- Computing from reveal txid gives a completely different 36-byte value
+- Child NFTs reference a non-existent parent
+
+**The Solution:**
+Extract the ref directly from the NFT's output script:
+```javascript
+// ✅ CORRECT - Extract from blockchain
+const tx = await rpc.call('getrawtransaction', [containerTxid, true]);
+const script = tx.vout[0].scriptPubKey.hex;
+// Script format: d8<36-byte ref>7576a914...
+//                ^^ skip this
+const containerRef = script.substring(2, 74);  // Extract actual ref
+
+// Now child NFTs will correctly nest:
+payload.in = [hexToUint8Array(containerRef)];  // Correct parent!
+```
+
+**Real-World Example:**
+- Container reveal txid: `4edad6696f9ba2c20b7f81bf135032bf1a781ebca40644c9fc1cd8aa817a3b63`
+- Wrong ref (from txid): `58584137d68cf3eb418cd38cd3bcab8a8e4a8a4150999d7e8e176d956290491300000000`
+- Correct ref (from script): `13499062956d178e7e9d9950418a4a8e8aabbcd38cd38c41ebf38cd63741585800000000`
+
+**The Impact:**
+We minted 20+ test NFTs with wrong refs. They exist on-chain and display in wallets, but they're orphaned - not connected to the container. These NFTs had to be melted and re-minted.
+
+**How We Found It:**
+After checking Glyphium and seeing the container empty, we compared:
+1. The ref we calculated from the txid
+2. The ref in the actual output script
+3. The ref in child NFT payloads
+
+They didn't match! Claude helped decode the output script and extract the correct values.
+
+**The Lesson:**
+Never assume you can compute blockchain references. Always query the actual on-chain data and extract what you need.
+
+### Discovery 5: SSL Certificate Issues with IPFS
 
 **The Problem:**
 IPFS uploads failing with: "SSL certificate problem: unable to get local issuer certificate"
@@ -503,7 +557,29 @@ const thumbnail = await createThumbnail(dataUrl, 150, 0.65);
 // Result: Clear images, reasonable size (~6KB)
 ```
 
-### 7. SSL Certificate Errors (IPFS)
+### 7. Orphaned Child NFTs (Container Refs)
+
+**The Bug:**
+```javascript
+// WRONG - Computing ref from reveal txid
+const containerRef = reverseHex(containerTxid) + '00000000';
+payload.in = [hexToUint8Array(containerRef)];
+// Result: NFT exists but doesn't appear in container
+```
+
+**The Fix:**
+```javascript
+// CORRECT - Extract ref from output script
+const tx = await rpc.call('getrawtransaction', [containerTxid, true]);
+const script = tx.vout[0].scriptPubKey.hex;
+const containerRef = script.substring(2, 74);  // Skip d8, take 72 chars
+payload.in = [hexToUint8Array(containerRef)];
+// Result: NFT properly nested in container
+```
+
+**Why:** The singleton ref is based on the COMMIT transaction, not the reveal. You MUST extract it from the actual output script.
+
+### 8. SSL Certificate Errors (IPFS)
 
 **Symptom:** "SSL certificate problem: unable to get local issuer certificate"
 

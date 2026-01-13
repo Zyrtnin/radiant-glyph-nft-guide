@@ -397,9 +397,85 @@ Ref:         263c6922e5b0bfb29b78e25331823ba0b59924d4da5348b414225b082d40fb6a000
 
 ### Container and Author Refs
 
-Refs are 36-byte values that reference other NFTs:
+**CRITICAL:** Container and author refs MUST be extracted from the NFT's singleton output script, NOT calculated from the transaction ID.
+
+#### The Problem
+
+Many implementations calculate refs like this (WRONG):
 
 ```javascript
+// ❌ WRONG - This will NOT work for container/author refs!
+const txidReversed = Buffer.from(containerTxid, 'hex').reverse();
+const voutLE = Buffer.alloc(4);
+voutLE.writeUInt32LE(0);
+const wrongRef = txidReversed.toString('hex') + voutLE.toString('hex');
+```
+
+**Why this fails:**
+- The singleton ref in the output script is based on the COMMIT transaction, not the reveal transaction
+- Computing from reveal txid gives you a completely different 36-byte value
+- Child NFTs will reference a non-existent parent, breaking the container hierarchy
+
+#### The Solution: Extract from Output Script
+
+**Correct approach:**
+
+```javascript
+// ✅ CORRECT - Extract ref from the singleton output script
+// 1. Get the reveal transaction
+const tx = await rpc.call('getrawtransaction', [revealTxid, true]);
+
+// 2. Get output 0's scriptPubKey
+const script = tx.vout[0].scriptPubKey.hex;
+
+// 3. Extract the 36-byte ref (positions 2-74 in hex string)
+// Script format: d8<36-byte ref>7576a914...
+//                ^^ skip this
+const containerRef = script.substring(2, 74);  // 72 hex chars = 36 bytes
+
+// 4. Use this ref in child NFT payloads
+const payload = {
+    p: [2],
+    name: "Child NFT",
+    in: [hexToUint8Array(containerRef)],  // Now correctly references parent
+    by: [hexToUint8Array(authorRef)]      // Also extracted from output script
+};
+```
+
+#### Real-World Example
+
+**Container NFT:**
+- Reveal txid: `4edad6696f9ba2c20b7f81bf135032bf1a781ebca40644c9fc1cd8aa817a3b63`
+- Output script: `d813499062956d178e7e9d9950418a4a8e8aabbcd38cd38c41ebf38cd63741585800000000757...`
+- **Correct ref**: `13499062956d178e7e9d9950418a4a8e8aabbcd38cd38c41ebf38cd63741585800000000` (from script)
+- **Wrong ref**: `58584137d68cf3eb418cd38cd3bcab8a8e4a8a4150999d7e8e176d956290491300000000` (from txid)
+
+Using the wrong ref means:
+- Child NFTs won't appear in Glyphium under the container
+- The hierarchy breaks
+- NFTs exist but are orphaned
+
+#### Implementation
+
+```javascript
+// Helper to extract singleton ref from a transaction
+async function getSingletonRef(txid, vout = 0) {
+    const tx = await rpc.call('getrawtransaction', [txid, true]);
+    const script = tx.vout[vout].scriptPubKey.hex;
+
+    // Verify it's a singleton script (starts with d8)
+    if (!script.startsWith('d8')) {
+        throw new Error('Not a singleton output');
+    }
+
+    // Extract 36-byte ref (72 hex chars starting at position 2)
+    return script.substring(2, 74);
+}
+
+// Use when creating child NFTs
+const containerRef = await getSingletonRef(containerTxid, 0);
+const authorRef = await getSingletonRef(authorTxid, 0);
+
 function hexToUint8Array(hex) {
     const bytes = new Uint8Array(hex.length / 2);
     for (let i = 0; i < hex.length; i += 2) {
@@ -411,10 +487,24 @@ function hexToUint8Array(hex) {
 const payload = {
     p: [2],
     name: "My NFT",
-    in: [hexToUint8Array(containerRef)],  // 72 hex chars
-    by: [hexToUint8Array(authorRef)]      // 72 hex chars
+    in: [hexToUint8Array(containerRef)],  // 72 hex chars from OUTPUT SCRIPT
+    by: [hexToUint8Array(authorRef)]      // 72 hex chars from OUTPUT SCRIPT
 };
 ```
+
+#### Why This Matters
+
+Container refs organize NFTs into collections:
+- All NFTs with the same `in` ref appear under that container in explorers
+- This creates browsable collections (e.g., "FlipperHub Verified Photos")
+- Essential for platform branding and user experience
+
+**Testing container refs:**
+1. Mint a container NFT (no `in` field)
+2. Extract its ref from the output script
+3. Mint child NFTs using that ref in their `in` field
+4. Check Glyphium - children should appear nested under the container
+5. If children are orphaned, your ref extraction is wrong
 
 ### JavaScript CBOR Encoding
 
@@ -901,6 +991,36 @@ IPFS_SKIP_SSL_VERIFY=true
 
 **Production Fix:** Configure proper SSL certificates in PHP.
 
+### "Child NFTs don't appear in container" (Glyphium/Explorers)
+
+**Cause:** Using txid-derived ref instead of extracting from output script.
+
+**Symptoms:**
+- Child NFTs exist and are visible in explorers
+- BUT they don't appear nested under the container
+- Container shows 0 children even though child NFTs have `in` field set
+
+**Fix:**
+```javascript
+// ❌ WRONG - Don't calculate from txid
+const wrongRef = reverseHex(containerTxid) + '00000000';
+
+// ✅ CORRECT - Extract from output script
+const tx = await rpc.call('getrawtransaction', [containerTxid, true]);
+const script = tx.vout[0].scriptPubKey.hex;
+const correctRef = script.substring(2, 74);  // Skip 'd8', take next 72 chars
+```
+
+**Why it happens:**
+- The singleton ref is based on the COMMIT transaction, not the reveal
+- Reveal txid ≠ the ref value in the output script
+- You must query the blockchain and extract the ref from the actual output
+
+**Verification:**
+1. Check your container ref matches the value in the output script (starts at position 2)
+2. Child NFTs should use this exact ref in their `in` field
+3. In Glyphium, click the container - children should be listed
+
 ---
 
 ## Complete Implementation Example
@@ -1068,6 +1188,177 @@ Import your wallet and check:
 
 ---
 
+## Security Best Practices
+
+### Input Validation for Blockchain Operations
+
+When building applications that interact with the Radiant blockchain, **always validate inputs** before passing them to RPC calls or transaction signing scripts. Malformed data can cause errors, vulnerabilities, or unexpected behavior.
+
+#### Transaction ID Validation
+
+```javascript
+// Validate txid format (64 hex characters)
+function isValidTxid(txid) {
+    return /^[a-f0-9]{64}$/i.test(txid);
+}
+
+// Example usage
+const commitTxid = userInput.trim();
+if (!isValidTxid(commitTxid)) {
+    throw new Error('Invalid transaction ID format');
+}
+```
+
+```php
+// PHP version
+if (!preg_match('/^[a-f0-9]{64}$/i', $commitTxid)) {
+    throw new Exception('Invalid commit transaction ID format');
+}
+```
+
+#### Glyph Hex Validation
+
+Glyph payloads must start with the "gly" marker (`676c79` in hex). Validate both format and size:
+
+```javascript
+// Validate glyph hex format
+function isValidGlyphHex(glyphHex) {
+    // Must start with "gly" marker (676c79)
+    if (!glyphHex.toLowerCase().startsWith('676c79')) {
+        return false;
+    }
+
+    // Must be valid hex
+    if (!/^[a-f0-9]+$/i.test(glyphHex)) {
+        return false;
+    }
+
+    // Reasonable size limit (e.g., 100KB = 200,000 hex chars)
+    if (glyphHex.length > 200000) {
+        return false;
+    }
+
+    return true;
+}
+```
+
+```php
+// PHP version with detailed validation
+function validateGlyphHex($glyphHex) {
+    // Validate format (must start with "gly" marker)
+    if (!preg_match('/^676c79[a-f0-9]*$/i', $glyphHex)) {
+        throw new Exception('Invalid glyph hex format (must start with "gly" marker)');
+    }
+
+    // Validate length (prevent excessive data)
+    if (strlen($glyphHex) > 200000) { // 100KB hex = 200,000 chars
+        throw new Exception('Glyph hex data too large (max 100KB)');
+    }
+
+    return true;
+}
+```
+
+#### Output Index Validation
+
+Validate that output indices (vout) are within reasonable bounds:
+
+```javascript
+function isValidVout(vout) {
+    const index = parseInt(vout, 10);
+    return !isNaN(index) && index >= 0 && index < 1000;
+}
+```
+
+```php
+// Validate commitVout is reasonable
+if ($commitVout < 0 || $commitVout > 1000) {
+    throw new Exception('Invalid commit output index');
+}
+```
+
+#### Address Validation
+
+Always validate Radiant addresses using the RPC:
+
+```javascript
+async function validateAddress(address) {
+    const validation = await rpc.call('validateaddress', [address]);
+    if (!validation.isvalid) {
+        throw new Error('Invalid Radiant address');
+    }
+    return validation;
+}
+```
+
+```php
+// PHP version
+if ($destAddress) {
+    $validation = $this->rpc->call('validateaddress', [$destAddress]);
+    if (!$validation['isvalid']) {
+        throw new Exception('Invalid destination address');
+    }
+}
+```
+
+#### Complete Example: Secure Reveal Transaction Creation
+
+```php
+function createRevealTransaction($commitTxid, $commitVout, $glyphHex, $destAddress = null) {
+    // 1. Validate commit txid format
+    if (!preg_match('/^[a-f0-9]{64}$/i', $commitTxid)) {
+        throw new Exception('Invalid commit transaction ID format');
+    }
+
+    // 2. Validate commit vout is reasonable
+    if ($commitVout < 0 || $commitVout > 1000) {
+        throw new Exception('Invalid commit output index');
+    }
+
+    // 3. Validate glyph hex format and content
+    if (!preg_match('/^676c79[a-f0-9]*$/i', $glyphHex)) {
+        throw new Exception('Invalid glyph hex format (must start with "gly" marker)');
+    }
+
+    // 4. Validate glyph hex length (prevent excessive data)
+    if (strlen($glyphHex) > 200000) { // 100KB hex = 200,000 chars
+        throw new Exception('Glyph hex data too large (max 100KB)');
+    }
+
+    // 5. Validate destination address if provided
+    if ($destAddress) {
+        $validation = $this->rpc->call('validateaddress', [$destAddress]);
+        if (!$validation['isvalid']) {
+            throw new Exception('Invalid destination address');
+        }
+    }
+
+    // All inputs validated - proceed with transaction creation
+    return $this->executeRevealTransaction($commitTxid, $commitVout, $glyphHex, $destAddress);
+}
+```
+
+#### Why This Matters
+
+- **Prevents Script Errors**: Malformed hex or txids can cause Node.js signing scripts to crash
+- **Avoids Lost Funds**: Invalid addresses or indices can result in unspendable outputs
+- **Security**: Validates data before passing to shell commands or RPC calls
+- **Better UX**: Provides clear error messages before attempting blockchain operations
+
+#### Validation Checklist
+
+Before any blockchain operation:
+
+- [ ] Transaction IDs are 64 hex characters
+- [ ] Output indices are non-negative integers < 1000
+- [ ] Glyph hex starts with `676c79` ("gly" marker)
+- [ ] Glyph hex is valid hexadecimal only
+- [ ] Glyph hex size is reasonable (< 100KB recommended)
+- [ ] Radiant addresses validated via RPC `validateaddress`
+- [ ] All user inputs sanitized before passing to shell commands
+
+---
+
 ## Appendix: Quick Reference
 
 ### Opcodes
@@ -1117,7 +1408,7 @@ Import your wallet and check:
 
 ---
 
-**Last Updated:** 2026-01-11
+**Last Updated:** 2026-01-12
 **Based on Verified Mainnet Transactions:**
 - With thumbnail: `27390efab1e3168c05301b18f6cdfd553a6d122a41496d0f5e104e79a918be7e`
 
